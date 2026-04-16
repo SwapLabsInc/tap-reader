@@ -75,4 +75,26 @@ describe("TapProtocol hot path deadlines", () => {
       code: "LIST_ENTRY_MISSING",
     });
   });
+
+  it("does not apply the hot-path timeout to unrelated shared list helpers", async () => {
+    jest.useFakeTimers();
+    const { default: TapProtocol } = await import("../src/TapProtocol.mjs");
+    const tapProtocol = new TapProtocol({
+      bee: {
+        get: jest.fn(
+          () =>
+            new Promise((resolve) => {
+              setTimeout(() => {
+                resolve({ value: "7" });
+              }, 2_500);
+            })
+        ),
+      },
+    });
+
+    const pending = tapProtocol.getDeploymentsLength();
+    await jest.advanceTimersByTimeAsync(2_500);
+
+    await expect(pending).resolves.toBe(7);
+  });
 });

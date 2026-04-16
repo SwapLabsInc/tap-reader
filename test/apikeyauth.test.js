@@ -15,6 +15,12 @@ describe("ApiKeyAuth helpers", () => {
         authorization: "Bearer bearer-key",
       })
     ).toBe("bearer-key");
+
+    expect(
+      getSuppliedApiKeyFromHeaders({
+        authorization: "bearer lowercase-key",
+      })
+    ).toBe("lowercase-key");
   });
 
   it("reads API keys from socket auth payloads", async () => {
@@ -39,6 +45,16 @@ describe("ApiKeyAuth helpers", () => {
         },
       })
     ).toBe("bearer-key");
+
+    expect(
+      getSuppliedApiKeyFromSocket({
+        handshake: {
+          auth: {
+            token: "bearer lowercase-key",
+          },
+        },
+      })
+    ).toBe("lowercase-key");
   });
 
   it("falls back to socket handshake headers", async () => {

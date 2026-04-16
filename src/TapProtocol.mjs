@@ -2127,8 +2127,9 @@ export default class TapProtocol {
    * @returns {Promise<number>} The number of transfers for the specified address and ticker.
    */
   async getAccountTransferListLength(address, ticker) {
-    return this.getLength(
-        "atrl/" + address + "/" + JSON.stringify(ticker.toLowerCase())
+    return this.getLengthWithDeadline(
+      "atrl/" + address + "/" + JSON.stringify(ticker.toLowerCase()),
+      "accountTransferListLength"
     );
   }
   /**
@@ -2142,12 +2143,13 @@ export default class TapProtocol {
   async getAccountTransferList(address, ticker, offset = 0, max = 500) {
     ticker = JSON.stringify(ticker.toLowerCase());
     let out = [];
-    let records = await this.getListRecords(
+    let records = await this.getListRecordsWithDeadline(
         "atrl/" + address + "/" + ticker,
         "atrli/" + address + "/" + ticker,
         offset,
         max,
-        true
+        true,
+        "accountTransferList"
     );
 
     if (!Array.isArray(records)) {
@@ -2662,7 +2664,7 @@ export default class TapProtocol {
     let out = [];
     const batch = this.tracManager.bee;
 
-    let length = await this.getBeeValueWithDeadline(length_key, "getListRecords.length");
+    let length = await batch.get(length_key);
     if (length === null) {
       length = 0;
     } else {
@@ -2671,15 +2673,7 @@ export default class TapProtocol {
     let j = 0;
     for (let i = offset; i < length; i++) {
       if (j < max) {
-        let entry = await this.getBeeValueWithDeadline(
-          iterator_key + "/" + i,
-          "getListRecords.entry"
-        );
-        if (entry === null) {
-          const error = new Error(`Missing list entry for ${iterator_key}/${i}`);
-          error.code = "LIST_ENTRY_MISSING";
-          throw error;
-        }
+        let entry = await batch.get(iterator_key + "/" + i);
         if (return_json) {
           entry = JSON.parse(entry.value);
         } else {
@@ -2701,13 +2695,93 @@ export default class TapProtocol {
    * @returns {Promise<number>} A promise that resolves to the length of the list.
    */
   async getLength(length_key) {
-    let length = await this.getBeeValueWithDeadline(length_key, "getLength");
+    let length = await this.tracManager.bee.get(length_key);
     if (length === null) {
       length = 0;
     } else {
       length = parseInt(length.value);
     }
     return length;
+  }
+
+  async getLengthWithDeadline(length_key, operation) {
+    let length = await this.getBeeValueWithDeadline(length_key, operation);
+    if (length === null) {
+      length = 0;
+    } else {
+      length = parseInt(length.value);
+    }
+    return length;
+  }
+
+  async getListRecordsWithDeadline(
+    length_key,
+    iterator_key,
+    offset,
+    max,
+    return_json,
+    operation
+  ) {
+    if(typeof offset === "string" && this.isNumeric(offset)) {
+      offset = parseInt(''+offset);
+    }
+
+    if(typeof max === "string" && this.isNumeric(max)) {
+      max = parseInt(''+max);
+    }
+
+    if(typeof offset !== "string" && !this.isNumeric(offset)) {
+      return null;
+    }
+
+    if(typeof max !== "string" && !this.isNumeric(max)) {
+      return null;
+    }
+
+    if (max > 500) {
+      return "request too large";
+    }
+
+    if (offset < 0) {
+      return "invalid offset";
+    }
+
+    let out = [];
+    let length = await this.getBeeValueWithDeadline(
+      length_key,
+      `${operation}.length`
+    );
+    if (length === null) {
+      length = 0;
+    } else {
+      length = parseInt(length.value);
+    }
+
+    let j = 0;
+    for (let i = offset; i < length; i++) {
+      if (j < max) {
+        let entry = await this.getBeeValueWithDeadline(
+          iterator_key + "/" + i,
+          `${operation}.entry`
+        );
+        if (entry === null) {
+          const error = new Error(`Missing list entry for ${iterator_key}/${i}`);
+          error.code = "LIST_ENTRY_MISSING";
+          throw error;
+        }
+        if (return_json) {
+          entry = JSON.parse(entry.value);
+        } else {
+          entry = entry.value;
+        }
+        out.push(entry);
+      } else {
+        break;
+      }
+      j++;
+    }
+
+    return out;
   }
 
   async getBeeValueWithDeadline(key, operation) {

@@ -10,6 +10,7 @@ import ConcurrencyGate from "./ConcurrencyGate.mjs";
 import RequestMonitor from "./RequestMonitor.mjs";
 
 const REQUEST_TIMEOUT_MS = 8_000;
+const REQUEST_CONTEXT_KEY = Symbol("requestContextKey");
 const TRANSFER_AMOUNT_GATE = {
   maxActive: 64,
   maxQueued: 512,
@@ -27,6 +28,7 @@ export default class WebsocketModule {
   constructor(tracManager) {
     this.tracManager = tracManager;
     this.apiKey = (process.env.TRAC_API_KEY || process.env.TAP_READER_API_KEY || "").trim();
+    this.requestContextCounter = 0;
     this.requestContexts = new Map();
     this.requestGates = new Map([
       [
@@ -93,7 +95,8 @@ export default class WebsocketModule {
           callId: cmd.call_id,
           socketId: socket.id,
         });
-        this.requestContexts.set(cmd.call_id, context);
+        cmd[REQUEST_CONTEXT_KEY] = this.nextRequestContextKey(socket);
+        this.requestContexts.set(cmd[REQUEST_CONTEXT_KEY], context);
         let requestError = null;
 
         try {
@@ -1318,11 +1321,16 @@ export default class WebsocketModule {
             this.sendErrorResponse(socket, cmd, error, context);
           }
         } finally {
-          this.requestContexts.delete(cmd.call_id);
+          this.requestContexts.delete(cmd[REQUEST_CONTEXT_KEY]);
+          delete cmd[REQUEST_CONTEXT_KEY];
           this.requestMonitor.finish(context, context.status, requestError ?? context.error);
         }
       });
     });
+  }
+  nextRequestContextKey(socket) {
+    this.requestContextCounter += 1;
+    return `${socket.id}:${this.requestContextCounter}`;
   }
   async runCommandWithControls(cmd, task) {
     const deadlineAt = Date.now() + REQUEST_TIMEOUT_MS;
@@ -1396,11 +1404,24 @@ export default class WebsocketModule {
   }
 
   getRequestContext(cmd) {
-    if (typeof cmd?.call_id === "undefined") {
+    if (typeof cmd?.[REQUEST_CONTEXT_KEY] === "undefined") {
       return null;
     }
 
-    return this.requestContexts.get(cmd.call_id) ?? null;
+    return this.requestContexts.get(cmd[REQUEST_CONTEXT_KEY]) ?? null;
+  }
+
+  emitErrorEvent(socket, cmd, error, code = null) {
+    this.io.to(socket.id).emit("error", {
+      error,
+      code,
+      cmd: {
+        call_id:
+          typeof cmd?.call_id === "undefined" ? null : cmd.call_id,
+        func: cmd?.func ?? null,
+        args: Array.isArray(cmd?.args) ? cmd.args : [],
+      },
+    });
   }
 
   sendSuccessResponse(socket, cmd, result, context = null) {
@@ -1424,6 +1445,7 @@ export default class WebsocketModule {
       requestContext.error = error;
     }
 
+    this.emitErrorEvent(socket, cmd, classified.message, classified.code);
     this.io.to(
       socket.id
     ).emit(
@@ -1496,7 +1518,7 @@ export default class WebsocketModule {
       requestContext.error = error;
     }
 
-    this.io.to(socket.id).emit("error", { error: "invalid command", cmd });
+    this.emitErrorEvent(socket, cmd, error.message, error.code);
 
     if (typeof cmd?.call_id !== "undefined") {
       this.io.to(

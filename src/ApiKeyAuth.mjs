@@ -12,6 +12,19 @@ function normalizeHeaderValue(value) {
   return "";
 }
 
+function getBearerToken(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const match = value.match(/^Bearer\s+(.+)$/i);
+  if (match === null) {
+    return null;
+  }
+
+  return match[1].trim();
+}
+
 export function apiKeysMatch(expectedApiKey, suppliedApiKey) {
   if (!suppliedApiKey) {
     return false;
@@ -34,8 +47,9 @@ export function getSuppliedApiKeyFromHeaders(headers = {}) {
   }
 
   const authHeader = normalizeHeaderValue(headers.authorization);
-  if (authHeader.startsWith("Bearer ")) {
-    return authHeader.slice("Bearer ".length).trim();
+  const bearerToken = getBearerToken(authHeader);
+  if (bearerToken !== null) {
+    return bearerToken;
   }
 
   return null;
@@ -54,8 +68,9 @@ export function getSuppliedApiKeyFromSocket(socket) {
 
   if (typeof auth.token === "string" && auth.token.trim().length > 0) {
     const token = auth.token.trim();
-    if (token.startsWith("Bearer ")) {
-      return token.slice("Bearer ".length).trim();
+    const bearerToken = getBearerToken(token);
+    if (bearerToken !== null) {
+      return bearerToken;
     }
     return token;
   }

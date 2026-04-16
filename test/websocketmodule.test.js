@@ -21,8 +21,10 @@ beforeEach(() => {
     on: jest.fn((event, handler) => {
       ioHandlers.set(event, handler);
     }),
-    to: jest.fn(() => ({
-      emit: emitSpy,
+    to: jest.fn((socketId) => ({
+      emit(event, payload) {
+        emitSpy(socketId, event, payload);
+      },
     })),
   };
 
@@ -71,10 +73,10 @@ async function buildWebsocketModule(tracManager = {}) {
   };
 }
 
-function connectSocket(connectionHandler) {
+function connectSocket(connectionHandler, socketId = "socket-1") {
   const socketHandlers = new Map();
   const socket = {
-    id: "socket-1",
+    id: socketId,
     on: jest.fn((event, handler) => {
       socketHandlers.set(event, handler);
     }),
@@ -160,8 +162,9 @@ describe("WebsocketModule", () => {
       args: [],
     });
 
-    expect(emitSpy).toHaveBeenCalledWith("error", {
+    expect(emitSpy).toHaveBeenCalledWith("socket-1", "error", {
       error: "invalid command",
+      code: "INVALID_COMMAND",
       cmd: {
         call_id: "call-1",
         func: "transferAmountByInscription",
@@ -169,6 +172,7 @@ describe("WebsocketModule", () => {
       },
     });
     expect(emitSpy).toHaveBeenCalledWith(
+      "socket-1",
       "response",
       expect.objectContaining({
         call_id: "call-1",
@@ -199,6 +203,15 @@ describe("WebsocketModule", () => {
     await pending;
 
     expect(emitSpy).toHaveBeenCalledWith(
+      "socket-1",
+      "error",
+      expect.objectContaining({
+        error: "Request timed out for transferAmountByInscription",
+        code: "REQUEST_TIMEOUT",
+      })
+    );
+    expect(emitSpy).toHaveBeenCalledWith(
+      "socket-1",
       "response",
       expect.objectContaining({
         call_id: "call-2",
@@ -231,6 +244,15 @@ describe("WebsocketModule", () => {
 
     expect(tapProtocol.getTransferAmountByInscription).not.toHaveBeenCalled();
     expect(emitSpy).toHaveBeenCalledWith(
+      "socket-1",
+      "error",
+      expect.objectContaining({
+        error: "transferAmountByInscription queue is full",
+        code: "SERVER_BUSY",
+      })
+    );
+    expect(emitSpy).toHaveBeenCalledWith(
+      "socket-1",
       "response",
       expect.objectContaining({
         call_id: "call-3",
@@ -276,6 +298,7 @@ describe("WebsocketModule", () => {
     expect(gate.active).toBe(1);
     expect(gate.getSnapshot().queued).toBe(0);
     expect(emitSpy).toHaveBeenCalledWith(
+      "socket-1",
       "response",
       expect.objectContaining({
         call_id: "call-4",
@@ -283,6 +306,7 @@ describe("WebsocketModule", () => {
       })
     );
     expect(emitSpy).toHaveBeenCalledWith(
+      "socket-1",
       "response",
       expect.objectContaining({
         call_id: "call-5",
@@ -294,5 +318,53 @@ describe("WebsocketModule", () => {
     await jest.advanceTimersByTimeAsync(0);
 
     expect(gate.active).toBe(0);
+  });
+
+  it("keeps request state isolated when two sockets reuse the same call_id", async () => {
+    const firstRequest = createDeferred();
+    const tapProtocol = {
+      getTransferAmountByInscription: jest
+        .fn()
+        .mockImplementationOnce(() => firstRequest.promise),
+    };
+    const { connectionHandler } = await buildWebsocketModule({
+      tapProtocol,
+    });
+    const firstSocket = connectSocket(connectionHandler, "socket-1");
+    const secondSocket = connectSocket(connectionHandler, "socket-2");
+
+    const firstPending = firstSocket.getHandler("get")({
+      call_id: "shared-call-id",
+      func: "transferAmountByInscription",
+      args: ["inscription-6"],
+    });
+    const secondPending = secondSocket.getHandler("get")({
+      call_id: "shared-call-id",
+      func: "transferAmountByInscription",
+      args: [],
+    });
+
+    await secondPending;
+    firstRequest.resolve("123");
+    await firstPending;
+
+    expect(emitSpy).toHaveBeenCalledWith(
+      "socket-2",
+      "response",
+      expect.objectContaining({
+        call_id: "shared-call-id",
+        error: "invalid command",
+        code: "INVALID_COMMAND",
+      })
+    );
+    expect(emitSpy).toHaveBeenCalledWith(
+      "socket-1",
+      "response",
+      expect.objectContaining({
+        call_id: "shared-call-id",
+        error: "",
+        result: "123",
+      })
+    );
   });
 });
