@@ -1,6 +1,10 @@
 import { createServer } from "http";
 import { Server } from "socket.io";
 import config from "config";
+import {
+  apiKeysMatch,
+  getSuppliedApiKeyFromSocket,
+} from "./ApiKeyAuth.mjs";
 
 export default class WebsocketModule {
   /**
@@ -9,6 +13,7 @@ export default class WebsocketModule {
    */
   constructor(tracManager) {
     this.tracManager = tracManager;
+    this.apiKey = (process.env.TAP_READER_API_KEY || "").trim();
 
     this.socket_port = config.get("websocketPort");
     this.httpServer = createServer();
@@ -20,6 +25,18 @@ export default class WebsocketModule {
         origin: config.get("websocketCORS"),
       },
     }).listen(this.socket_port);
+
+    if (this.apiKey.length > 0) {
+      this.io.use((socket, next) => {
+        const suppliedApiKey = getSuppliedApiKeyFromSocket(socket);
+        if (!apiKeysMatch(this.apiKey, suppliedApiKey)) {
+          next(new Error("unauthorized"));
+          return;
+        }
+
+        next();
+      });
+    }
 
     this.io.on("connection", (socket) => {
       socket.on("get", async (cmd) => {

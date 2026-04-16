@@ -3,42 +3,16 @@ import Fastify from "fastify";
 import TracManager from "./TracManager.mjs";
 import swagger from "@fastify/swagger";
 import fastifySwaggerUi from "@fastify/swagger-ui";
-import { timingSafeEqual } from "node:crypto";
+import {
+  apiKeysMatch,
+  getSuppliedApiKeyFromRequest,
+} from "./ApiKeyAuth.mjs";
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-function apiKeysMatch(expectedApiKey, suppliedApiKey) {
-  if (!suppliedApiKey) {
-    return false;
-  }
-
-  const expectedBuffer = Buffer.from(expectedApiKey);
-  const suppliedBuffer = Buffer.from(suppliedApiKey);
-
-  if (expectedBuffer.length !== suppliedBuffer.length) {
-    return false;
-  }
-
-  return timingSafeEqual(expectedBuffer, suppliedBuffer);
-}
-
-function getSuppliedApiKey(request) {
-  const headerApiKey = request.headers["x-api-key"];
-  if (typeof headerApiKey === "string" && headerApiKey.trim().length > 0) {
-    return headerApiKey.trim();
-  }
-
-  const authHeader = request.headers.authorization;
-  if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
-    return authHeader.slice("Bearer ".length).trim();
-  }
-
-  return null;
-}
 
 function getRequestPath(request) {
   return request.raw.url?.split("?")[0] ?? "";
@@ -142,7 +116,7 @@ export default class RestModule {
           return;
         }
 
-        const suppliedApiKey = getSuppliedApiKey(request);
+        const suppliedApiKey = getSuppliedApiKeyFromRequest(request);
         if (!apiKeysMatch(this.apiKey, suppliedApiKey)) {
           return reply.code(401).send({ error: "unauthorized", result: null });
         }
