@@ -29,7 +29,7 @@ export default class RestModule {
   fastify;
   constructor(tracManager) {
     this.tracManager = tracManager;
-    this.apiKey = (process.env.TAP_READER_API_KEY || "").trim();
+    this.apiKey = (process.env.TRAC_API_KEY || process.env.TAP_READER_API_KEY || "").trim();
 
     if(config.get("enableRestSSL"))
     {

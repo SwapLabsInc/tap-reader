@@ -42,13 +42,14 @@ async function buildRestModule() {
 }
 
 afterEach(() => {
+  delete process.env.TRAC_API_KEY;
   delete process.env.TAP_READER_API_KEY;
   jest.resetModules();
 });
 
 describe("RestModule", () => {
   it("allows unauthenticated health checks when an API key is configured", async () => {
-    process.env.TAP_READER_API_KEY = "secret-key";
+    process.env.TRAC_API_KEY = "secret-key";
     const restModule = await buildRestModule();
 
     const response = await restModule.fastify.inject({
@@ -63,7 +64,7 @@ describe("RestModule", () => {
   });
 
   it("rejects protected routes without an API key", async () => {
-    process.env.TAP_READER_API_KEY = "secret-key";
+    process.env.TRAC_API_KEY = "secret-key";
     const restModule = await buildRestModule();
 
     const response = await restModule.fastify.inject({
@@ -78,7 +79,7 @@ describe("RestModule", () => {
   });
 
   it("accepts x-api-key authentication for protected routes", async () => {
-    process.env.TAP_READER_API_KEY = "secret-key";
+    process.env.TRAC_API_KEY = "secret-key";
     const restModule = await buildRestModule();
 
     const response = await restModule.fastify.inject({
@@ -96,7 +97,7 @@ describe("RestModule", () => {
   });
 
   it("accepts bearer authentication for protected routes", async () => {
-    process.env.TAP_READER_API_KEY = "secret-key";
+    process.env.TRAC_API_KEY = "secret-key";
     const restModule = await buildRestModule();
 
     const response = await restModule.fastify.inject({
