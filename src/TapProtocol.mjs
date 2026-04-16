@@ -1,3 +1,7 @@
+import { withTimeout } from "./AsyncUtils.mjs";
+
+const HOT_PATH_BEE_READ_TIMEOUT_MS = 2_000;
+
 export default class TapProtocol {
   constructor(tracManager) {
     this.tracManager = tracManager;
@@ -1326,7 +1330,10 @@ export default class TapProtocol {
    * @returns {Promise<number|null>} The transfer amount or null if not found.
    */
   async getTransferAmountByInscription(inscription_id) {
-    let amount = await this.tracManager.bee.get("tamt/" + inscription_id);
+    let amount = await this.getBeeValueWithDeadline(
+      "tamt/" + inscription_id,
+      "transferAmountByInscription"
+    );
     if (amount !== null) {
       return amount.value;
     }
@@ -2655,7 +2662,7 @@ export default class TapProtocol {
     let out = [];
     const batch = this.tracManager.bee;
 
-    let length = await batch.get(length_key);
+    let length = await this.getBeeValueWithDeadline(length_key, "getListRecords.length");
     if (length === null) {
       length = 0;
     } else {
@@ -2664,7 +2671,15 @@ export default class TapProtocol {
     let j = 0;
     for (let i = offset; i < length; i++) {
       if (j < max) {
-        let entry = await batch.get(iterator_key + "/" + i);
+        let entry = await this.getBeeValueWithDeadline(
+          iterator_key + "/" + i,
+          "getListRecords.entry"
+        );
+        if (entry === null) {
+          const error = new Error(`Missing list entry for ${iterator_key}/${i}`);
+          error.code = "LIST_ENTRY_MISSING";
+          throw error;
+        }
         if (return_json) {
           entry = JSON.parse(entry.value);
         } else {
@@ -2686,13 +2701,22 @@ export default class TapProtocol {
    * @returns {Promise<number>} A promise that resolves to the length of the list.
    */
   async getLength(length_key) {
-    let length = await this.tracManager.bee.get(length_key);
+    let length = await this.getBeeValueWithDeadline(length_key, "getLength");
     if (length === null) {
       length = 0;
     } else {
       length = parseInt(length.value);
     }
     return length;
+  }
+
+  async getBeeValueWithDeadline(key, operation) {
+    return await withTimeout(
+      () => this.tracManager.bee.get(key),
+      HOT_PATH_BEE_READ_TIMEOUT_MS,
+      `Hyperbee read timed out during ${operation}`,
+      { key, operation }
+    );
   }
 
   isNumeric(str) {
