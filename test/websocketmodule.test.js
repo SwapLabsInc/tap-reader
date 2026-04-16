@@ -5,6 +5,7 @@ let serverFactoryMock;
 
 beforeEach(() => {
   jest.resetModules();
+  delete process.env.TRAC_API_KEY;
   delete process.env.TAP_READER_API_KEY;
 
   fakeIo = {
@@ -35,13 +36,14 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env.TRAC_API_KEY;
   delete process.env.TAP_READER_API_KEY;
   jest.resetModules();
 });
 
 describe("WebsocketModule", () => {
-  it("registers auth middleware when TAP_READER_API_KEY is set", async () => {
-    process.env.TAP_READER_API_KEY = "secret-key";
+  it("registers auth middleware when TRAC_API_KEY is set", async () => {
+    process.env.TRAC_API_KEY = "secret-key";
     const { default: WebsocketModule } = await import("../src/WebsocketModule.mjs");
 
     new WebsocketModule({ tapProtocol: {} });
@@ -66,7 +68,7 @@ describe("WebsocketModule", () => {
   });
 
   it("rejects unauthorized websocket handshakes", async () => {
-    process.env.TAP_READER_API_KEY = "secret-key";
+    process.env.TRAC_API_KEY = "secret-key";
     const { default: WebsocketModule } = await import("../src/WebsocketModule.mjs");
 
     new WebsocketModule({ tapProtocol: {} });

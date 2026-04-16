@@ -13,7 +13,7 @@ export default class WebsocketModule {
    */
   constructor(tracManager) {
     this.tracManager = tracManager;
-    this.apiKey = (process.env.TAP_READER_API_KEY || "").trim();
+    this.apiKey = (process.env.TRAC_API_KEY || process.env.TAP_READER_API_KEY || "").trim();
 
     this.socket_port = config.get("websocketPort");
     this.httpServer = createServer();
