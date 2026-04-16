@@ -85,6 +85,8 @@ If rest is enabled, you can instead use the exposed endpoints. You may test thes
 http://localhost:5099/docs
 ```
 
+Set `TRAC_API_KEY` before starting the process to require either an `x-api-key` header or `Authorization: Bearer <key>` on all REST routes. `GET /healthz` remains unauthenticated for service checks. The same key is also enforced on socket.io connections, accepting either handshake headers or `auth.apiKey`.
+
 In case websockets are enabled, you can access their endpoints according to this documentation:
 
 https://github.com/BennyTheDev/trac-tap-public-endpoint
@@ -1366,4 +1368,3 @@ Gets the length of a list based on a specified key.
 | Param | Type | Description |
 | --- | --- | --- |
 | length_key | <code>string</code> | The key to determine the length of the list. |
-

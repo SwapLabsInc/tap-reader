@@ -3,12 +3,20 @@ import Fastify from "fastify";
 import TracManager from "./TracManager.mjs";
 import swagger from "@fastify/swagger";
 import fastifySwaggerUi from "@fastify/swagger-ui";
+import {
+  apiKeysMatch,
+  getSuppliedApiKeyFromRequest,
+} from "./ApiKeyAuth.mjs";
 import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function getRequestPath(request) {
+  return request.raw.url?.split("?")[0] ?? "";
+}
 
 export default class RestModule {
   /**
@@ -21,6 +29,7 @@ export default class RestModule {
   fastify;
   constructor(tracManager) {
     this.tracManager = tracManager;
+    this.apiKey = (process.env.TRAC_API_KEY || process.env.TAP_READER_API_KEY || "").trim();
 
     if(config.get("enableRestSSL"))
     {
@@ -101,6 +110,19 @@ export default class RestModule {
     const cacheControlConfig = config.get('restCacheControl');
     const restHeaders = config.get('restHeaders');
 
+    if (this.apiKey.length > 0) {
+      this.fastify.addHook("onRequest", async (request, reply) => {
+        if (getRequestPath(request) === "/healthz") {
+          return;
+        }
+
+        const suppliedApiKey = getSuppliedApiKeyFromRequest(request);
+        if (!apiKeysMatch(this.apiKey, suppliedApiKey)) {
+          return reply.code(401).send({ error: "unauthorized", result: null });
+        }
+      });
+    }
+
     this.fastify.addHook('onSend', (request, reply, payload, done) => {
 
       const maxAge = cacheControlConfig.maxAge;
@@ -108,6 +130,7 @@ export default class RestModule {
 
       // Set cache control header
       if (
+        request.routeOptions.url == '/healthz' ||
         request.routeOptions.url == '/getSyncStatus' || 
         request.routeOptions.url == '/getReorgs' || 
         request.routeOptions.url == '/getCurrentBlock' ) {
@@ -129,6 +152,19 @@ export default class RestModule {
 
   initializeRoutes() {
     this.fastify.register((fastify, opts, done) => {
+
+      fastify.get(
+        "/healthz",
+        {
+          schema: {
+            description: "Health check endpoint for service monitoring.",
+            tags: ["Node"],
+          },
+        },
+        async (_request, reply) => {
+          reply.send({ ok: true });
+        }
+      );
 
       fastify.get(
         "/getSyncStatus",

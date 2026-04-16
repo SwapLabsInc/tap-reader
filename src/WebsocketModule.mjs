@@ -1,6 +1,24 @@
 import { createServer } from "http";
 import { Server } from "socket.io";
 import config from "config";
+import {
+  apiKeysMatch,
+  getSuppliedApiKeyFromSocket,
+} from "./ApiKeyAuth.mjs";
+import { TimeoutError, withTimeout } from "./AsyncUtils.mjs";
+import ConcurrencyGate from "./ConcurrencyGate.mjs";
+import RequestMonitor from "./RequestMonitor.mjs";
+
+const REQUEST_TIMEOUT_MS = 8_000;
+const REQUEST_CONTEXT_KEY = Symbol("requestContextKey");
+const TRANSFER_AMOUNT_GATE = {
+  maxActive: 64,
+  maxQueued: 512,
+};
+const TRANSFER_LIST_GATE = {
+  maxActive: 8,
+  maxQueued: 128,
+};
 
 export default class WebsocketModule {
   /**
@@ -9,6 +27,35 @@ export default class WebsocketModule {
    */
   constructor(tracManager) {
     this.tracManager = tracManager;
+    this.apiKey = (process.env.TRAC_API_KEY || process.env.TAP_READER_API_KEY || "").trim();
+    this.requestContextCounter = 0;
+    this.requestContexts = new Map();
+    this.requestGates = new Map([
+      [
+        "transferAmountByInscription",
+        new ConcurrencyGate(
+          "transferAmountByInscription",
+          TRANSFER_AMOUNT_GATE.maxActive,
+          TRANSFER_AMOUNT_GATE.maxQueued
+        ),
+      ],
+      [
+        "accountTransferList",
+        new ConcurrencyGate(
+          "accountTransferList",
+          TRANSFER_LIST_GATE.maxActive,
+          TRANSFER_LIST_GATE.maxQueued
+        ),
+      ],
+      [
+        "accountTransferListLength",
+        new ConcurrencyGate(
+          "accountTransferListLength",
+          TRANSFER_LIST_GATE.maxActive,
+          TRANSFER_LIST_GATE.maxQueued
+        ),
+      ],
+    ]);
 
     this.socket_port = config.get("websocketPort");
     this.httpServer = createServer();
@@ -20,14 +67,43 @@ export default class WebsocketModule {
         origin: config.get("websocketCORS"),
       },
     }).listen(this.socket_port);
+    this.requestMonitor = new RequestMonitor("tap-reader", () => ({
+      socketCount: this.io?.engine?.clientsCount ?? 0,
+      peerCount: this.tracManager.peerConnectionCount ?? 0,
+      gates: [...this.requestGates.entries()].map(([func, gate]) => ({
+        func,
+        ...gate.getSnapshot(),
+      })),
+    }));
+
+    if (this.apiKey.length > 0) {
+      this.io.use((socket, next) => {
+        const suppliedApiKey = getSuppliedApiKeyFromSocket(socket);
+        if (!apiKeysMatch(this.apiKey, suppliedApiKey)) {
+          next(new Error("unauthorized"));
+          return;
+        }
+
+        next();
+      });
+    }
 
     this.io.on("connection", (socket) => {
       socket.on("get", async (cmd) => {
         if (!this.validCmd(cmd, socket)) return;
-        let result = null;
+        const context = this.requestMonitor.start(cmd.func, {
+          callId: cmd.call_id,
+          socketId: socket.id,
+        });
+        cmd[REQUEST_CONTEXT_KEY] = this.nextRequestContextKey(socket);
+        this.requestContexts.set(cmd[REQUEST_CONTEXT_KEY], context);
+        let requestError = null;
 
         try {
-          switch (cmd.func) {
+          const result = await this.runCommandWithControls(cmd, async () => {
+            let result = null;
+
+            switch (cmd.func) {
 
             case "transferredListLength":
               if (cmd.args.length != 1) {
@@ -1227,33 +1303,204 @@ export default class WebsocketModule {
                   cmd.args[0]
                 );
               break;
+            default:
+              this.invalidCmd(cmd, socket);
+              return;
+            }
+
+            return result;
+          });
+
+          if (!context.responseSent) {
+            this.sendSuccessResponse(socket, cmd, result, context);
           }
-        } catch (e) {
-          // if this happened, then something really bad happened
-          console.log(e);
-          this.invalidCmd(cmd, socket);
-          return;
+        } catch (error) {
+          requestError = error;
+
+          if (!context.responseSent) {
+            this.sendErrorResponse(socket, cmd, error, context);
+          }
+        } finally {
+          this.requestContexts.delete(cmd[REQUEST_CONTEXT_KEY]);
+          delete cmd[REQUEST_CONTEXT_KEY];
+          this.requestMonitor.finish(context, context.status, requestError ?? context.error);
         }
-
-        const response = {
-          error: "",
-          func: cmd.func,
-          args: cmd.args,
-          call_id: cmd.call_id,
-          result: result,
-        };
-
-        this.io.to(socket.id).emit("response", {
-          error: "",
-          func: cmd.func,
-          args: cmd.args,
-          call_id: cmd.call_id,
-          result: result,
-        });
-
-        console.log("Served response", response);
       });
     });
+  }
+  nextRequestContextKey(socket) {
+    this.requestContextCounter += 1;
+    return `${socket.id}:${this.requestContextCounter}`;
+  }
+  async runCommandWithControls(cmd, task) {
+    const deadlineAt = Date.now() + REQUEST_TIMEOUT_MS;
+    const gate = this.requestGates.get(cmd.func);
+
+    if (gate === undefined) {
+      return await this.runWithDeadline(cmd, task, deadlineAt);
+    }
+
+    const release = await gate.acquire({ maxWaitMs: REQUEST_TIMEOUT_MS });
+    return await this.runWithDeadline(cmd, task, deadlineAt, release);
+  }
+
+  async runWithDeadline(cmd, task, deadlineAt, release = null) {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      release?.();
+      throw new TimeoutError(`Request timed out for ${cmd.func}`, REQUEST_TIMEOUT_MS, {
+        callId: cmd.call_id,
+        func: cmd.func,
+      });
+    }
+
+    let activeRelease = release;
+    const releaseOnce = () => {
+      if (activeRelease !== null) {
+        activeRelease();
+        activeRelease = null;
+      }
+    };
+
+    const operationPromise = Promise.resolve().then(task);
+    operationPromise.then(
+      () => {
+        releaseOnce();
+      },
+      () => {
+        releaseOnce();
+      }
+    );
+
+    try {
+      return await withTimeout(
+        operationPromise,
+        remainingMs,
+        `Request timed out for ${cmd.func}`,
+        {
+          callId: cmd.call_id,
+          func: cmd.func,
+        }
+      );
+    } catch (error) {
+      if (error?.code !== "REQUEST_TIMEOUT") {
+        releaseOnce();
+      }
+
+      throw error;
+    }
+  }
+
+  buildResponse(cmd, overrides = {}) {
+    return {
+      error: "",
+      func: cmd?.func ?? null,
+      args: Array.isArray(cmd?.args) ? cmd.args : [],
+      call_id:
+        typeof cmd?.call_id === "undefined" ? null : cmd.call_id,
+      result: null,
+      ...overrides,
+    };
+  }
+
+  getRequestContext(cmd) {
+    if (typeof cmd?.[REQUEST_CONTEXT_KEY] === "undefined") {
+      return null;
+    }
+
+    return this.requestContexts.get(cmd[REQUEST_CONTEXT_KEY]) ?? null;
+  }
+
+  emitErrorEvent(socket, cmd, error, code = null) {
+    this.io.to(socket.id).emit("error", {
+      error,
+      code,
+      cmd: {
+        call_id:
+          typeof cmd?.call_id === "undefined" ? null : cmd.call_id,
+        func: cmd?.func ?? null,
+        args: Array.isArray(cmd?.args) ? cmd.args : [],
+      },
+    });
+  }
+
+  sendSuccessResponse(socket, cmd, result, context = null) {
+    const requestContext = context ?? this.getRequestContext(cmd);
+    if (requestContext !== null) {
+      requestContext.status = "success";
+      requestContext.responseSent = true;
+      requestContext.error = null;
+    }
+
+    this.io.to(socket.id).emit("response", this.buildResponse(cmd, { result }));
+  }
+
+  sendErrorResponse(socket, cmd, error, context = null) {
+    const requestContext = context ?? this.getRequestContext(cmd);
+    const classified = this.classifyError(error);
+
+    if (requestContext !== null) {
+      requestContext.status = classified.status;
+      requestContext.responseSent = true;
+      requestContext.error = error;
+    }
+
+    this.emitErrorEvent(socket, cmd, classified.message, classified.code);
+    this.io.to(
+      socket.id
+    ).emit(
+      "response",
+      this.buildResponse(cmd, {
+        error: classified.message,
+        code: classified.code,
+      })
+    );
+  }
+
+  classifyError(error) {
+    if (error?.code === "INVALID_COMMAND") {
+      return {
+        status: "invalid",
+        code: error.code,
+        message: "invalid command",
+      };
+    }
+
+    if (error?.code === "SERVER_BUSY") {
+      return {
+        status: "busy",
+        code: error.code,
+        message: error.message || "server busy",
+      };
+    }
+
+    if (error?.code === "REQUEST_TIMEOUT") {
+      return {
+        status: "timeout",
+        code: error.code,
+        message: error.message || "request timed out",
+      };
+    }
+
+    return {
+      status: "error",
+      code: error?.code ?? "REQUEST_FAILED",
+      message:
+        error instanceof Error
+          ? error.message
+          : "request failed",
+    };
+  }
+
+  getDebugSnapshot() {
+    return {
+      socketCount: this.io?.engine?.clientsCount ?? 0,
+      monitor: this.requestMonitor.getSnapshot(),
+      gates: [...this.requestGates.entries()].map(([func, gate]) => ({
+        func,
+        ...gate.getSnapshot(),
+      })),
+    };
   }
   /**
    * Handles an invalid command by emitting an error to the socket.
@@ -1261,7 +1508,29 @@ export default class WebsocketModule {
    * @param {Socket} socket - The WebSocket socket object.
    */
   invalidCmd(cmd, socket) {
-    this.io.to(socket.id).emit("error", { error: "invalid command", cmd: cmd });
+    const error = new Error("invalid command");
+    error.code = "INVALID_COMMAND";
+
+    const requestContext = this.getRequestContext(cmd);
+    if (requestContext !== null) {
+      requestContext.status = "invalid";
+      requestContext.responseSent = true;
+      requestContext.error = error;
+    }
+
+    this.emitErrorEvent(socket, cmd, error.message, error.code);
+
+    if (typeof cmd?.call_id !== "undefined") {
+      this.io.to(
+        socket.id
+      ).emit(
+        "response",
+        this.buildResponse(cmd, {
+          error: error.message,
+          code: error.code,
+        })
+      );
+    }
   }
   /**
    * Validates if a given command is valid.
@@ -1271,6 +1540,8 @@ export default class WebsocketModule {
    */
   validCmd(cmd, socket) {
     if (
+      cmd === null ||
+      typeof cmd !== "object" ||
       typeof cmd.call_id == "undefined" ||
       typeof cmd.func == "undefined" ||
       typeof cmd.args == "undefined" ||

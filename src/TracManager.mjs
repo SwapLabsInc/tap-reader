@@ -38,6 +38,7 @@ export default class TracManager {
     this.store = new Corestore("./tapstore");
     this.swarm = new Hyperswarm({maxPeers : 1024, maxParallel: 512, maxServerConnections : 256, dht : dht});
     this.bee = null;
+    this.peerConnectionCount = 0;
     this.tapProtocol = new TapProtocol(this);
 
     goodbye(() => {
@@ -115,12 +116,16 @@ export default class TracManager {
    */
   async initHyperswarm(server, client) {
     this.swarm.on("connection", (connection, peerInfo) => {
+      this.peerConnectionCount += 1;
 
       console.log(
           "Connected to peer:",
           connection.remotePublicKey.toString("hex")
       );
 
+      connection.once("close", () => {
+        this.peerConnectionCount = Math.max(0, this.peerConnectionCount - 1);
+      });
 
       this.core.replicate(connection);
     });
@@ -177,5 +182,29 @@ export default class TracManager {
    */
   sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  getDebugSnapshot() {
+    const activeRequests = Array.isArray(this.core?.activeRequests)
+      ? this.core.activeRequests.length
+      : this.core?.activeRequests?.size ?? null;
+
+    return {
+      channel: this.core?.key?.toString("hex") ?? null,
+      core: {
+        length: this.core?.length ?? null,
+        contiguousLength: this.core?.contiguousLength ?? null,
+        byteLength: this.core?.byteLength ?? null,
+        fork: this.core?.fork ?? null,
+        activeRequests,
+      },
+      peerCount: this.peerConnectionCount,
+      swarm: {
+        connections: this.swarm?.connections?.size ?? null,
+        destroyed: this.swarm?.destroyed ?? null,
+      },
+      websocket: this.websocketServer?.getDebugSnapshot?.() ?? null,
+      hasBlockDownloader: Boolean(this.blockDownloader),
+    };
   }
 }

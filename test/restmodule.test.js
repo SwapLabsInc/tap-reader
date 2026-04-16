@@ -1,65 +1,116 @@
-import TracManager from "../src/TracManager";
-import {jest} from '@jest/globals';
+const { afterEach, beforeEach, describe, expect, it } = require("@jest/globals");
 
-jest.describe("RestModule Integration Tests", () => {
-  let tracCore;
-  let server;
+const configValues = {
+  enableRestSSL: false,
+  enableRestApiDocs: false,
+  restCacheControl: {
+    maxAge: 1,
+    public: false,
+  },
+  restHeaders: [],
+  host: "127.0.0.1",
+  restPort: 5099,
+};
 
-  // Setup before all tests
-  jest.beforeAll(async () => {
-    tracCore = new TracManager();
-    await tracCore.initReader(true, true, -1, -1);
-    await tracCore.restServer.fastify.ready();
+beforeEach(() => {
+  jest.resetModules();
+  jest.unstable_mockModule("config", () => ({
+    default: {
+      get(key) {
+        return configValues[key];
+      },
+    },
+  }));
+});
+
+async function buildRestModule() {
+  const { default: RestModule } = await import("../src/RestModule.mjs");
+  const restModule = new RestModule({
+    blockDownloader: null,
+    tapProtocol: {
+      async getCurrentBlock() {
+        return 123;
+      },
+      async getReorgs() {
+        return ["reorg"];
+      },
+    },
   });
 
-  // Teardown after all tests
-  jest.afterAll(async () => {
-    await server.close();
-  });
+  await restModule.fastify.ready();
+  return restModule;
+}
 
-  // Test for /getDeployments/ route
-  jest.describe("/getDeployments/ route", () => {
-    jest.it("should return data with the correct structure", async () => {
-      const response = await tracCore.restServer.fastify.inject({
-        method: "GET",
-        url: "/getDeployments/",
-      });
+afterEach(() => {
+  delete process.env.TRAC_API_KEY;
+  delete process.env.TAP_READER_API_KEY;
+  jest.resetModules();
+});
 
-      jest.expect(response.statusCode).toBe(200);
-      const jsonResponse = response.json();
+describe("RestModule", () => {
+  it("allows unauthenticated health checks when an API key is configured", async () => {
+    process.env.TRAC_API_KEY = "secret-key";
+    const restModule = await buildRestModule();
 
-      // Checking the overall structure
-      jest.expect(jsonResponse).toEqual(
-        jest.expect.objectContaining({
-          result: jest.expect.any(Array),
-        })
-      );
-
-      // Checking the structure of each item in the result array
-      jsonResponse.result.forEach((item) => {
-        jest.expect(item).toEqual(
-          jest.expect.objectContaining({
-            tick: jest.expect.any(String),
-            max: jest.expect.any(String),
-            lim: jest.expect.any(String),
-            dec: jest.expect.any(Number),
-            blck: jest.expect.any(Number),
-            tx: jest.expect.any(String),
-            ins: jest.expect.any(String),
-            num: jest.expect.any(Number),
-            ts: jest.expect.any(Number),
-            addr: jest.expect.any(String),
-            crsd: jest.expect.any(Boolean),
-            dmt: jest.expect.any(Boolean),
-            elem: jest.expect.anything(), // can be null or any value
-            prj: jest.expect.anything(), // can be null or any value
-            dim: jest.expect.anything(), // can be null or any value
-            dt: jest.expect.anything(), // can be null or any value
-          })
-        );
-      });
+    const response = await restModule.fastify.inject({
+      method: "GET",
+      url: "/healthz",
     });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true });
+
+    await restModule.fastify.close();
   });
 
-  // Additional tests for other routes and scenarios
+  it("rejects protected routes without an API key", async () => {
+    process.env.TRAC_API_KEY = "secret-key";
+    const restModule = await buildRestModule();
+
+    const response = await restModule.fastify.inject({
+      method: "GET",
+      url: "/getCurrentBlock",
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: "unauthorized", result: null });
+
+    await restModule.fastify.close();
+  });
+
+  it("accepts x-api-key authentication for protected routes", async () => {
+    process.env.TRAC_API_KEY = "secret-key";
+    const restModule = await buildRestModule();
+
+    const response = await restModule.fastify.inject({
+      method: "GET",
+      url: "/getCurrentBlock",
+      headers: {
+        "x-api-key": "secret-key",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ result: 123 });
+
+    await restModule.fastify.close();
+  });
+
+  it("accepts bearer authentication for protected routes", async () => {
+    process.env.TRAC_API_KEY = "secret-key";
+    const restModule = await buildRestModule();
+
+    const response = await restModule.fastify.inject({
+      method: "GET",
+      url: "/getCurrentBlock",
+      headers: {
+        authorization: "Bearer secret-key",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ result: 123 });
+
+    await restModule.fastify.close();
+  });
 });
