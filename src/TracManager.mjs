@@ -83,6 +83,14 @@ export default class TracManager {
 
     await this.bee.ready();
 
+    this.noWaitCore = this.core.session({ wait: false, writable: false });
+    this.noWaitBee = new Hyperbee(this.noWaitCore, {
+      keyEncoding: "utf-8",
+      valueEncoding: "utf-8",
+    });
+
+    await this.noWaitBee.ready();
+
     if (config.get("enableWebsockets")) {
       console.log("Enabling websocket");
       this.websocketServer = new WebsocketModule(this);

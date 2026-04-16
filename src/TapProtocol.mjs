@@ -1300,7 +1300,7 @@ export default class TapProtocol {
    * @returns {Promise<Array|null>}
    */
   async getReorgs() {
-    let reorgs = await this.tracManager.bee.get('reorgs');
+    let reorgs = await this.getLocallyAvailableValue('reorgs');
     if (reorgs !== null) {
       return JSON.parse(reorgs.value);
     }
@@ -1313,11 +1313,22 @@ export default class TapProtocol {
    * @returns {Promise<number|null>}
    */
   async getCurrentBlock() {
-    let reorgs = await this.tracManager.bee.get('block');
+    let reorgs = await this.getLocallyAvailableValue('block');
     if (reorgs !== null) {
       return JSON.parse(reorgs.value);
     }
     return null;
+  }
+
+  async getLocallyAvailableValue(key) {
+    try {
+      return await this.tracManager.noWaitBee.get(key);
+    } catch (e) {
+      if (e?.code === "BLOCK_NOT_AVAILABLE") {
+        return null;
+      }
+      throw e;
+    }
   }
 
   /**
