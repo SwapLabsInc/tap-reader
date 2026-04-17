@@ -1,3 +1,7 @@
+import { withTimeout } from "./AsyncUtils.mjs";
+
+const HOT_PATH_BEE_READ_TIMEOUT_MS = 2_000;
+
 export default class TapProtocol {
   constructor(tracManager) {
     this.tracManager = tracManager;
@@ -1326,7 +1330,10 @@ export default class TapProtocol {
    * @returns {Promise<number|null>} The transfer amount or null if not found.
    */
   async getTransferAmountByInscription(inscription_id) {
-    let amount = await this.tracManager.bee.get("tamt/" + inscription_id);
+    let amount = await this.getBeeValueWithDeadline(
+      "tamt/" + inscription_id,
+      "transferAmountByInscription"
+    );
     if (amount !== null) {
       return amount.value;
     }
@@ -2120,8 +2127,9 @@ export default class TapProtocol {
    * @returns {Promise<number>} The number of transfers for the specified address and ticker.
    */
   async getAccountTransferListLength(address, ticker) {
-    return this.getLength(
-        "atrl/" + address + "/" + JSON.stringify(ticker.toLowerCase())
+    return this.getLengthWithDeadline(
+      "atrl/" + address + "/" + JSON.stringify(ticker.toLowerCase()),
+      "accountTransferListLength"
     );
   }
   /**
@@ -2135,12 +2143,13 @@ export default class TapProtocol {
   async getAccountTransferList(address, ticker, offset = 0, max = 500) {
     ticker = JSON.stringify(ticker.toLowerCase());
     let out = [];
-    let records = await this.getListRecords(
+    let records = await this.getListRecordsWithDeadline(
         "atrl/" + address + "/" + ticker,
         "atrli/" + address + "/" + ticker,
         offset,
         max,
-        true
+        true,
+        "accountTransferList"
     );
 
     if (!Array.isArray(records)) {
@@ -2693,6 +2702,95 @@ export default class TapProtocol {
       length = parseInt(length.value);
     }
     return length;
+  }
+
+  async getLengthWithDeadline(length_key, operation) {
+    let length = await this.getBeeValueWithDeadline(length_key, operation);
+    if (length === null) {
+      length = 0;
+    } else {
+      length = parseInt(length.value);
+    }
+    return length;
+  }
+
+  async getListRecordsWithDeadline(
+    length_key,
+    iterator_key,
+    offset,
+    max,
+    return_json,
+    operation
+  ) {
+    if(typeof offset === "string" && this.isNumeric(offset)) {
+      offset = parseInt(''+offset);
+    }
+
+    if(typeof max === "string" && this.isNumeric(max)) {
+      max = parseInt(''+max);
+    }
+
+    if(typeof offset !== "string" && !this.isNumeric(offset)) {
+      return null;
+    }
+
+    if(typeof max !== "string" && !this.isNumeric(max)) {
+      return null;
+    }
+
+    if (max > 500) {
+      return "request too large";
+    }
+
+    if (offset < 0) {
+      return "invalid offset";
+    }
+
+    let out = [];
+    let length = await this.getBeeValueWithDeadline(
+      length_key,
+      `${operation}.length`
+    );
+    if (length === null) {
+      length = 0;
+    } else {
+      length = parseInt(length.value);
+    }
+
+    let j = 0;
+    for (let i = offset; i < length; i++) {
+      if (j < max) {
+        let entry = await this.getBeeValueWithDeadline(
+          iterator_key + "/" + i,
+          `${operation}.entry`
+        );
+        if (entry === null) {
+          const error = new Error(`Missing list entry for ${iterator_key}/${i}`);
+          error.code = "LIST_ENTRY_MISSING";
+          throw error;
+        }
+        if (return_json) {
+          entry = JSON.parse(entry.value);
+        } else {
+          entry = entry.value;
+        }
+        out.push(entry);
+      } else {
+        break;
+      }
+      j++;
+    }
+
+    return out;
+  }
+
+  async getBeeValueWithDeadline(key, operation) {
+    return await withTimeout(
+      () => this.tracManager.bee.get(key),
+      HOT_PATH_BEE_READ_TIMEOUT_MS,
+      `Hyperbee read timed out during ${operation}`,
+      { key, operation }
+    );
   }
 
   isNumeric(str) {
